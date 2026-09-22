@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Apple must grant this before it can be signed in.
+	     Request at: https://developer.apple.com/contact/carplay/ (type: Audio)
+	     Until then, leave CODE_SIGN_ENTITLEMENTS out of project.yml. -->
+	<key>com.apple.developer.carplay-audio</key>
+	<true/>
+</dict>
+</plist>
