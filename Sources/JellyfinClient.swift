@@ -286,17 +286,137 @@ final class JellyfinClient {
     }
 
     /// Tracks by a single artist, used by "play everything by this artist".
-    func tracks(byArtist artistId: String) async throws -> [JFItem] {
+    /// - Parameter allLibraries: ignore the library picker — for Siri, which
+    ///   can't see which library is selected.
+    func tracks(byArtist artistId: String, allLibraries: Bool = false) async throws -> [JFItem] {
         let response: ItemsResponse = try await get("Items", query: [
             "userId": session.userId,
             "artistIds": artistId,
             "includeItemTypes": "Audio",
             "recursive": "true",
-            "parentId": libraryId,
+            "parentId": allLibraries ? nil : libraryId,
             "sortBy": "Album,ParentIndexNumber,IndexNumber",
             "fields": Self.trackFields,
         ])
         return response.items
+    }
+
+    // MARK: - Home
+
+    /// Songs most recently played, newest first.
+    func recentlyPlayedTracks(limit: Int = 30) async throws -> [JFItem] {
+        try await homeTracks(sortBy: "DatePlayed", limit: limit)
+    }
+
+    /// Songs played most often.
+    func mostPlayedTracks(limit: Int = 30) async throws -> [JFItem] {
+        try await homeTracks(sortBy: "PlayCount", limit: limit)
+    }
+
+    private func homeTracks(sortBy: String, limit: Int) async throws -> [JFItem] {
+        let response: ItemsResponse = try await get("Items", query: [
+            "userId": session.userId,
+            "includeItemTypes": "Audio",
+            "recursive": "true",
+            "parentId": libraryId,
+            "filters": "IsPlayed",
+            "sortBy": sortBy,
+            "sortOrder": "Descending",
+            "limit": String(limit),
+            "fields": Self.trackFields,
+        ])
+        return response.items
+    }
+
+    /// Albums newest to the server first.
+    func recentlyAddedAlbums(limit: Int = 20) async throws -> [JFItem] {
+        let response: ItemsResponse = try await get("Items", query: [
+            "userId": session.userId,
+            "includeItemTypes": "MusicAlbum",
+            "recursive": "true",
+            "parentId": libraryId,
+            "sortBy": "DateCreated",
+            "sortOrder": "Descending",
+            "limit": String(limit),
+        ])
+        return response.items
+    }
+
+    // MARK: - Favorites
+
+    /// Favorites of one type — MusicArtist, MusicAlbum or Audio.
+    func favorites(type: String, limit: Int = 300) async throws -> [JFItem] {
+        let response: ItemsResponse = try await get("Items", query: [
+            "userId": session.userId,
+            "includeItemTypes": type,
+            "recursive": "true",
+            "parentId": libraryId,
+            "filters": "IsFavorite",
+            "sortBy": type == "Audio" ? "Album,ParentIndexNumber,IndexNumber" : "SortName",
+            "limit": String(limit),
+            "fields": type == "Audio" ? Self.trackFields : nil,
+        ])
+        return response.items
+    }
+
+    func setFavorite(_ isFavorite: Bool, itemId: String) async throws {
+        let method = isFavorite ? "POST" : "DELETE"
+        // 10.9 moved this off the per-user path; older servers only know the old one.
+        do {
+            try await send(method, "UserFavoriteItems/\(itemId)", query: ["userId": session.userId])
+        } catch JellyfinError.http(404, _) {
+            try await send(method, "Users/\(session.userId)/FavoriteItems/\(itemId)")
+        }
+    }
+
+    // MARK: - Instant Mix
+
+    /// A radio-style list the server builds from any song, album, artist or
+    /// playlist. Not scoped to a library — a mix should range freely.
+    func instantMix(from itemId: String, limit: Int = 100) async throws -> [JFItem] {
+        let response: ItemsResponse = try await get("Items/\(itemId)/InstantMix", query: [
+            "userId": session.userId,
+            "limit": String(limit),
+            "fields": Self.trackFields,
+        ])
+        return response.items
+    }
+
+    // MARK: - Voice requests
+    //
+    // Deliberately not scoped to `libraryId`: a spoken "play the story tape"
+    // shouldn't fail because the picker happens to be on Music.
+
+    /// Items of one type whose name matches `term`. `type` is a Jellyfin item
+    /// type: MusicArtist, MusicAlbum, Playlist or Audio.
+    func voiceSearch(_ term: String, type: String, limit: Int = 15) async throws -> [JFItem] {
+        let response: ItemsResponse = try await get("Items", query: [
+            "userId": session.userId,
+            "searchTerm": term,
+            "includeItemTypes": type,
+            "recursive": "true",
+            "limit": String(limit),
+            "fields": type == "Audio" ? Self.trackFields : nil,
+        ])
+        return response.items
+    }
+
+    /// A random selection from the current library, for "play some music".
+    func randomTracks(limit: Int = 200) async throws -> [JFItem] {
+        let response: ItemsResponse = try await get("Items", query: [
+            "userId": session.userId,
+            "includeItemTypes": "Audio",
+            "recursive": "true",
+            "parentId": libraryId,
+            "sortBy": "Random",
+            "limit": String(limit),
+            "fields": Self.trackFields,
+        ])
+        return response.items
+    }
+
+    func item(id: String) async throws -> JFItem {
+        try await get("Users/\(session.userId)/Items/\(id)", query: ["fields": Self.trackFields])
     }
 
     // MARK: - Playlist editing

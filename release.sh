@@ -40,6 +40,7 @@ xcodebuild -project JellyCast.xcodeproj -scheme JellyCast \
   -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
   -archivePath "$ARCHIVE" \
   CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Distribution" \
+  PROVISIONING_PROFILE_SPECIFIER="JellyCast App Store" \
   archive
 
 echo "==> Exporting .ipa"

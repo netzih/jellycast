@@ -7,5 +7,9 @@
 	     Until then, leave CODE_SIGN_ENTITLEMENTS out of project.yml. -->
 	<key>com.apple.developer.carplay-audio</key>
 	<true/>
+	<!-- Enable "Siri" on the App ID in the developer portal, then download
+	     fresh profiles; install.sh signs with whatever the profile grants. -->
+	<key>com.apple.developer.siri</key>
+	<true/>
 </dict>
 </plist>

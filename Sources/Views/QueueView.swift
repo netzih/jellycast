@@ -69,6 +69,11 @@ struct QueueView: View {
 
     private var list: some View {
         List {
+            modeRow
+                .listRowSeparator(.hidden)
+                .moveDisabled(true)
+                .deleteDisabled(true)
+
             // Enumerated rather than keyed on the track: the same song can sit
             // in a queue more than once, so only its position identifies a row.
             ForEach(Array(player.queue.enumerated()), id: \.offset) { offset, track in
@@ -92,6 +97,32 @@ struct QueueView: View {
             }
         }
         .listStyle(.plain)
+    }
+
+    private var modeRow: some View {
+        HStack(spacing: 12) {
+            Button { player.toggleShuffle() } label: {
+                Label("Shuffle", systemImage: "shuffle")
+                    .frame(maxWidth: .infinity)
+            }
+            .tint(player.isShuffled ? .accentColor : .secondary)
+
+            Button { player.cycleRepeatMode() } label: {
+                Label(repeatTitle, systemImage: player.repeatMode.symbolName)
+                    .frame(maxWidth: .infinity)
+            }
+            .tint(player.repeatMode != .off ? .accentColor : .secondary)
+        }
+        .buttonStyle(.bordered)
+        .font(.subheadline.weight(.medium))
+    }
+
+    private var repeatTitle: String {
+        switch player.repeatMode {
+        case .off: return "Repeat"
+        case .all: return "Repeat all"
+        case .one: return "Repeat one"
+        }
     }
 
     private func row(for track: PlaybackTrack, at offset: Int) -> some View {

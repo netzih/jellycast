@@ -1,5 +1,6 @@
 import SwiftUI
 import GoogleCast
+import Intents
 
 @main
 struct JellyCastApp: App {
@@ -14,6 +15,14 @@ struct JellyCastApp: App {
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
+    private let playMediaHandler = PlayMediaIntentHandler()
+
+    /// Siri's "play … on JellyCast" arrives here, with the app launched in the
+    /// background if it wasn't running.
+    func application(_ application: UIApplication, handlerFor intent: INIntent) -> Any? {
+        intent is INPlayMediaIntent ? playMediaHandler : nil
+    }
+
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil

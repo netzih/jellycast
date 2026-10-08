@@ -303,7 +303,7 @@ struct TrackListView: View {
 
                 HStack(spacing: 12) {
                     Button {
-                        appState.player.play(items: tracks)
+                        appState.player.play(items: tracks, shuffle: false)
                     } label: {
                         Label("Play", systemImage: "play.fill")
                             .frame(maxWidth: .infinity)
@@ -311,7 +311,7 @@ struct TrackListView: View {
                     .buttonStyle(.borderedProminent)
 
                     Button {
-                        appState.player.play(items: tracks.shuffled())
+                        appState.player.play(items: tracks, shuffle: true)
                     } label: {
                         Label("Shuffle", systemImage: "shuffle")
                             .frame(maxWidth: .infinity)
@@ -376,6 +376,12 @@ struct TrackListView: View {
 
                     Spacer(minLength: 8)
 
+                    if appState.isFavorite(track) {
+                        Image(systemName: "heart.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.pink)
+                            .accessibilityLabel("Favorite")
+                    }
                     Text(track.duration.clockString)
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -455,7 +461,7 @@ struct ArtistDetailView: View {
                         Task {
                             guard let client = appState.client else { return }
                             let tracks = (try? await client.tracks(byArtist: artist.id)) ?? []
-                            appState.player.play(items: tracks.shuffled())
+                            appState.player.play(items: tracks, shuffle: true)
                         }
                     } label: {
                         Label("Shuffle everything", systemImage: "shuffle")

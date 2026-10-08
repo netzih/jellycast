@@ -15,15 +15,24 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 cd "$(dirname "$0")"
 
 # Prefer a profile issued for this exact bundle id: only an explicit App ID can
-# carry the CarPlay entitlement. Fall back to the team wildcard otherwise.
+# carry the CarPlay and Siri entitlements. Fall back to the team wildcard
+# otherwise. Only development profiles count (an App Store profile lists no
+# devices), and the newest wins, so a freshly downloaded profile with a new
+# capability beats the stale one it replaces.
 PROFILE=""
 WILDCARD=""
+NEWEST=""
 for candidate in ~/Library/Developer/Xcode/UserData/Provisioning\ Profiles/*.mobileprovision; do
   security cms -D -i "$candidate" > "$BUILD_DIR/probe.plist" 2>/dev/null || continue
+  dev=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:get-task-allow" \
+    "$BUILD_DIR/probe.plist" 2>/dev/null || true)
+  [ "$dev" = "true" ] || continue
   appid=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" \
     "$BUILD_DIR/probe.plist" 2>/dev/null || true)
+  # ISO 8601 in UTC, so plain string comparison orders them.
+  created=$(plutil -extract CreationDate raw -o - "$BUILD_DIR/probe.plist" 2>/dev/null || echo "")
   case "$appid" in
-    "$TEAM.$BUNDLE_ID") PROFILE="$candidate"; break ;;
+    "$TEAM.$BUNDLE_ID") [[ ! "$created" < "$NEWEST" ]] && { PROFILE="$candidate"; NEWEST="$created"; } ;;
     "$TEAM.*")          [ -z "$WILDCARD" ] && WILDCARD="$candidate" ;;
   esac
 done

@@ -18,6 +18,8 @@ final class CastEngine: NSObject, PlaybackEngine {
     /// mid-edit can't make us remove the wrong song.
     private var itemIDs: [UInt] = []
     private var index = 0
+    private var repeatMode: RepeatMode = .off
+    private var levelling = false
     private var positionTimer: Timer?
     private var pendingLoad: (tracks: [PlaybackTrack], startIndex: Int)?
 
@@ -53,12 +55,15 @@ final class CastEngine: NSObject, PlaybackEngine {
         let queueData = GCKMediaQueueDataBuilder(queueType: .playlist)
         queueData.items = queue.map(makeQueueItem)
         queueData.startIndex = UInt(index)
-        queueData.repeatMode = .off
+        queueData.repeatMode = Self.castRepeatMode(repeatMode)
 
         let request = GCKMediaLoadRequestDataBuilder()
         request.queueData = queueData.build()
         client.loadMedia(with: request.build())
         client.add(self)
+        // Applied once the receiver reports the load; stream volume set before
+        // then would land on the previous media.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.applyLevelling() }
         startPositionTimer()
         delegate?.engine(self, didChangeIndex: index)
         delegate?.engine(self, didChangeState: .buffering)
@@ -97,6 +102,32 @@ final class CastEngine: NSObject, PlaybackEngine {
         itemIDs = []
         index = 0
         delegate?.engine(self, didChangeState: .idle)
+    }
+
+    func setRepeatMode(_ mode: RepeatMode) {
+        repeatMode = mode
+        // The receiver advances on its own, so repeat has to live there too.
+        if !tracks.isEmpty { remoteClient?.queueSetRepeatMode(Self.castRepeatMode(mode)) }
+    }
+
+    func setLevelling(_ enabled: Bool) {
+        levelling = enabled
+        applyLevelling()
+    }
+
+    /// Stream volume scales this media only, under the speaker's own volume,
+    /// so the volume slider keeps meaning what it says.
+    private func applyLevelling() {
+        guard let client = remoteClient, tracks.indices.contains(index) else { return }
+        client.setStreamVolume(levelling ? tracks[index].levellingVolume : 1)
+    }
+
+    private static func castRepeatMode(_ mode: RepeatMode) -> GCKMediaRepeatMode {
+        switch mode {
+        case .off: return .off
+        case .all: return .all
+        case .one: return .single
+        }
     }
 
     /// Ends the connection to the speaker entirely.
@@ -187,6 +218,39 @@ final class CastEngine: NSObject, PlaybackEngine {
         index = newIndex
         remoteClient?.queueJumpToItem(withID: targetID)
         delegate?.engine(self, didChangeIndex: newIndex)
+    }
+
+    func reorder(_ newQueue: [PlaybackTrack], index newIndex: Int) {
+        guard newQueue.indices.contains(newIndex) else { return }
+        // Entries are matched by entry id, so duplicate songs keep their own
+        // receiver ids through the shuffle.
+        let idByEntry = Dictionary(
+            zip(tracks.map(\.entryId), itemIDs.indices.map { itemID(at: $0) }),
+            uniquingKeysWith: { first, _ in first }
+        )
+        let newIDs = newQueue.map { idByEntry[$0.entryId] ?? kGCKMediaQueueInvalidItemID }
+
+        guard let client = remoteClient, !newIDs.contains(kGCKMediaQueueInvalidItemID) else {
+            // Some entry hasn't been acknowledged yet, so it can't be addressed.
+            // Re-sending the queue and seeking back is a brief hiccup, not a wrong order.
+            let resumeAt = remoteClient?.approximateStreamPosition() ?? 0
+            load(queue: newQueue, startIndex: newIndex)
+            if resumeAt > 2 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    self?.seek(to: resumeAt)
+                }
+            }
+            return
+        }
+
+        tracks = newQueue
+        itemIDs = newIDs
+        index = newIndex
+        // Moving every id to the end, in order, rewrites the whole order at once.
+        client.queueReorderItems(
+            withIDs: newIDs.map { NSNumber(value: $0) },
+            insertBeforeItemWithID: kGCKMediaQueueInvalidItemID
+        )
     }
 
     /// Re-syncs `itemIDs` from a status update, but only when the receiver's
@@ -326,6 +390,7 @@ extension CastEngine: GCKRemoteMediaClientListener {
         if let newIndex, newIndex != index {
             index = newIndex
             delegate?.engine(self, didChangeIndex: newIndex)
+            applyLevelling()
         }
     }
 }

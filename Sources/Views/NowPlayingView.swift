@@ -2,6 +2,7 @@ import SwiftUI
 
 struct NowPlayingView: View {
     @ObservedObject var player: PlayerCoordinator
+    @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
     @State private var isScrubbing = false
@@ -39,6 +40,10 @@ struct NowPlayingView: View {
                 transportControls
                     .padding(.top, 8)
 
+                modeControls
+                    .padding(.horizontal, 24)
+                    .padding(.top, 6)
+
                 if player.route.isCast {
                     castVolume
                         .padding(.horizontal, 24)
@@ -52,6 +57,10 @@ struct NowPlayingView: View {
 
                 routeBadge
                     .padding(.top, 20)
+
+                if player.sleepTimer != .off {
+                    sleepBadge.padding(.top, 8)
+                }
 
                 Spacer(minLength: 12)
             }
@@ -67,12 +76,7 @@ struct NowPlayingView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     CastButton().frame(width: 28, height: 28)
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showQueue = true } label: {
-                        Image(systemName: "list.bullet")
-                    }
-                    .accessibilityLabel("Up next")
-                }
+                ToolbarItem(placement: .topBarTrailing) { moreMenu }
             }
             .sheet(isPresented: $showQueue) { QueueView(player: player) }
         }
@@ -104,10 +108,11 @@ struct NowPlayingView: View {
     }
 
     private var transportControls: some View {
-        HStack(spacing: 36) {
-            Button { player.previous() } label: {
-                Image(systemName: "backward.fill").font(.title)
+        HStack(spacing: 0) {
+            transportButton("gobackward.15", label: "Back 15 seconds", font: .title2) {
+                player.skip(by: -15)
             }
+            transportButton("backward.fill", label: "Previous", font: .title) { player.previous() }
 
             Button { player.togglePlayPause() } label: {
                 ZStack {
@@ -118,15 +123,139 @@ struct NowPlayingView: View {
                             .font(.system(size: 64))
                     }
                 }
-                .frame(width: 64, height: 64)
+                .frame(width: 72, height: 72)
             }
+            .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
 
-            Button { player.next() } label: {
-                Image(systemName: "forward.fill").font(.title)
+            transportButton("forward.fill", label: "Next", font: .title) { player.next() }
+            transportButton("goforward.15", label: "Forward 15 seconds", font: .title2) {
+                player.skip(by: 15)
             }
         }
         .foregroundStyle(.primary)
         .buttonStyle(.plain)
+        .padding(.horizontal, 16)
+    }
+
+    private func transportButton(
+        _ symbol: String, label: String, font: Font, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(font)
+                .frame(maxWidth: .infinity, minHeight: 56)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel(label)
+    }
+
+    /// Shuffle, queue and repeat — the modes, as opposed to the moment-to-moment transport.
+    private var modeControls: some View {
+        HStack {
+            Button { player.toggleShuffle() } label: {
+                modeIcon("shuffle", active: player.isShuffled)
+            }
+            .accessibilityLabel(player.isShuffled ? "Shuffle on" : "Shuffle off")
+
+            Spacer()
+
+            if let track = player.currentTrack {
+                let favorite = appState.isFavorite(track.item)
+                Button { appState.toggleFavorite(track.item) } label: {
+                    Image(systemName: favorite ? "heart.fill" : "heart")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(favorite ? Color.pink : .secondary)
+                        .frame(width: 40, height: 32)
+                }
+                .accessibilityLabel(favorite ? "Remove from favorites" : "Favorite")
+
+                Spacer()
+            }
+
+            Button { showQueue = true } label: {
+                modeIcon("list.bullet", active: false)
+            }
+            .accessibilityLabel("Up next")
+
+            Spacer()
+
+            Button { player.cycleRepeatMode() } label: {
+                modeIcon(player.repeatMode.symbolName, active: player.repeatMode != .off)
+            }
+            .accessibilityLabel(repeatLabel)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func modeIcon(_ symbol: String, active: Bool) -> some View {
+        Image(systemName: symbol)
+            .font(.body.weight(.semibold))
+            .foregroundStyle(active ? Color.accentColor : .secondary)
+            .frame(width: 40, height: 32)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(active ? Color.accentColor.opacity(0.15) : .clear)
+            )
+    }
+
+    private var repeatLabel: String {
+        switch player.repeatMode {
+        case .off: return "Repeat off"
+        case .all: return "Repeat all"
+        case .one: return "Repeat one"
+        }
+    }
+
+    private var moreMenu: some View {
+        Menu {
+            if let track = player.currentTrack {
+                Button {
+                    Task { await player.playInstantMix(from: track.item) }
+                } label: {
+                    Label("Instant Mix from this song", systemImage: "dot.radiowaves.left.and.right")
+                }
+            }
+            Menu {
+                ForEach([15, 30, 45, 60], id: \.self) { minutes in
+                    Button("\(minutes) minutes") { player.setSleepTimer(minutes: minutes) }
+                }
+                Button("End of this track") { player.sleepAtEndOfTrack() }
+                if player.sleepTimer != .off {
+                    Divider()
+                    Button("Turn off timer", role: .destructive) { player.cancelSleepTimer() }
+                }
+            } label: {
+                Label("Sleep timer", systemImage: "moon.zzz")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .accessibilityLabel("More")
+    }
+
+    /// Ticks once a second while a countdown is running.
+    private var sleepBadge: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            HStack(spacing: 6) {
+                Image(systemName: "moon.zzz.fill")
+                switch player.sleepTimer {
+                case .at(let deadline):
+                    Text("Stopping in \(max(0, deadline.timeIntervalSince(context.date)).clockString)")
+                        .monospacedDigit()
+                case .endOfTrack:
+                    Text("Stopping after this track")
+                case .off:
+                    EmptyView()
+                }
+                Button { player.cancelSleepTimer() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Turn off sleep timer")
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        }
     }
 
     private var castVolume: some View {

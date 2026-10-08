@@ -7,6 +7,11 @@ struct RootView: View {
         Group {
             if appState.isSignedIn {
                 MainTabView()
+                    .task {
+                        // Asked only once there's a library to play from.
+                        SiriVocabulary.requestAuthorizationIfNeeded()
+                        if let client = appState.client { await SiriVocabulary.update(using: client) }
+                    }
             } else {
                 LoginView()
             }
@@ -32,6 +37,8 @@ struct MainTabView: View {
     var body: some View {
         VStack(spacing: 0) {
             TabView {
+                HomeTab()
+                    .tabItem { Label("Home", systemImage: "house") }
                 LibraryTab(kind: .albums)
                     .tabItem { Label("Albums", systemImage: "square.stack") }
                 LibraryTab(kind: .artists)
@@ -40,8 +47,8 @@ struct MainTabView: View {
                     .tabItem { Label("Playlists", systemImage: "music.note.list") }
                 SearchTab()
                     .tabItem { Label("Search", systemImage: "magnifyingglass") }
-                SettingsTab()
-                    .tabItem { Label("Settings", systemImage: "gearshape") }
+                // Settings lives behind the gear on Home: a sixth tab would
+                // push everything past the fifth into a "More" list.
             }
             MiniPlayer(player: appState.player)
         }
@@ -121,6 +128,7 @@ struct LoginView: View {
 
 struct SettingsTab: View {
     @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) private var dismiss
     @State private var confirmSignOut = false
 
     var body: some View {
@@ -157,13 +165,24 @@ struct SettingsTab: View {
                     Text(appState.streamQuality.detail)
                 }
 
+                Section {
+                    Toggle("Volume levelling", isOn: $appState.volumeLevelling)
+                } header: {
+                    Text("Playback")
+                } footer: {
+                    Text("Turns loud tracks down to match quieter ones, using the loudness your Jellyfin server measured. Works on this iPhone, in the car and on speakers.")
+                }
+
                 Section("Account") {
                     LabeledContent("Signed in as", value: appState.userName)
                     Button("Sign out", role: .destructive) { confirmSignOut = true }
                 }
             }
             .navigationTitle("Settings")
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { CastButton().frame(width: 28, height: 28) } }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+            }
             .confirmationDialog(
                 "Sign out of Jellyfin?",
                 isPresented: $confirmSignOut,

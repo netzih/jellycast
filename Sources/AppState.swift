@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import GoogleCast
+import MediaPlayer
 
 /// Owns the Jellyfin session and is the single source of truth the UI —
 /// both the iPhone app and the CarPlay scene — reads from.
@@ -12,6 +13,17 @@ final class AppState: ObservableObject {
     @Published var streamQuality: StreamQuality {
         didSet { UserDefaults.standard.set(streamQuality.rawValue, forKey: Self.qualityKey) }
     }
+    /// Evens out loudness between tracks using Jellyfin's normalization gain.
+    @Published var volumeLevelling: Bool {
+        didSet {
+            UserDefaults.standard.set(volumeLevelling, forKey: Self.levellingKey)
+            player.setLevelling(volumeLevelling)
+        }
+    }
+
+    /// Favorite changes made in this session, by item id. Lists fetched
+    /// earlier carry stale `UserData`, so these win over what an item says.
+    @Published private(set) var favoriteOverrides: [String: Bool] = [:]
 
     /// The music folders the server offers — "Music" and "Story tapes" are two
     /// libraries, and mixing them into one list makes both harder to browse.
@@ -30,6 +42,7 @@ final class AppState: ObservableObject {
     private static let sessionKey = "jellyfinSession"
     private static let qualityKey = "JellyCast.streamQuality"
     private static let libraryKey = "JellyCast.selectedLibraryId"
+    private static let levellingKey = "JellyCast.volumeLevelling"
 
     /// Name of the current library, for the picker and the browse screens' titles.
     var selectedLibraryName: String? {
@@ -45,6 +58,8 @@ final class AppState: ObservableObject {
         streamQuality = StreamQuality(rawValue: raw) ?? .original
 
         selectedLibraryId = UserDefaults.standard.string(forKey: Self.libraryKey)
+        volumeLevelling = UserDefaults.standard.bool(forKey: Self.levellingKey)
+        player.setLevelling(volumeLevelling)
 
         if let data = Keychain.load(account: Self.sessionKey),
            let session = try? JSONDecoder().decode(JellyfinSession.self, from: data) {
@@ -79,11 +94,33 @@ final class AppState: ObservableObject {
         await loadLibraries()
     }
 
+    // MARK: - Favorites
+
+    func isFavorite(_ item: JFItem) -> Bool {
+        favoriteOverrides[item.id] ?? item.userData?.isFavorite ?? false
+    }
+
+    /// Flips the heart at once and tells the server; puts it back if the server refuses.
+    func toggleFavorite(_ item: JFItem) {
+        guard let client else { return }
+        let newValue = !isFavorite(item)
+        favoriteOverrides[item.id] = newValue
+        Task {
+            do {
+                try await client.setFavorite(newValue, itemId: item.id)
+            } catch {
+                favoriteOverrides[item.id] = !newValue
+                player.errorMessage = "Couldn't update favorites. \((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+            }
+        }
+    }
+
     func signOut() {
         player.shutdown()
         Keychain.delete(account: Self.sessionKey)
         client = nil
         libraries = []
+        favoriteOverrides = [:]
     }
 }
 
@@ -98,6 +135,9 @@ final class PlayerCoordinator: NSObject, ObservableObject {
     @Published private(set) var duration: TimeInterval = 0
     @Published var volume: Float = 0.5
     @Published var errorMessage: String?
+    @Published private(set) var isShuffled: Bool
+    @Published private(set) var repeatMode: RepeatMode
+    @Published private(set) var sleepTimer: SleepTimer = .off
 
     /// Set when a Cast session is live, regardless of which route is selected.
     @Published private(set) var availableCastDevice: String?
@@ -112,6 +152,15 @@ final class PlayerCoordinator: NSObject, ObservableObject {
     private var reportedItemId: String?
     private var lastProgressReport = Date.distantPast
 
+    /// While shuffled, the order the queue had before — by entry, so turning
+    /// shuffle off can put everything back, including tracks added since.
+    private var unshuffledOrder: [UUID] = []
+
+    private var sleepTask: Task<Void, Never>?
+
+    private static let shuffleKey = "JellyCast.shuffle"
+    private static let repeatKey = "JellyCast.repeatMode"
+
     var currentTrack: PlaybackTrack? {
         queue.indices.contains(index) ? queue[index] : nil
     }
@@ -123,9 +172,15 @@ final class PlayerCoordinator: NSObject, ObservableObject {
     }
 
     override init() {
+        isShuffled = UserDefaults.standard.bool(forKey: Self.shuffleKey)
+        repeatMode = UserDefaults.standard.string(forKey: Self.repeatKey)
+            .flatMap(RepeatMode.init(rawValue:)) ?? .off
         super.init()
         localPlayer.delegate = self
         castEngine.delegate = self
+        localPlayer.setRepeatMode(repeatMode)
+        castEngine.setRepeatMode(repeatMode)
+        configureModeCommands()
 
         castEngine.onConnectionChange = { [weak self] deviceName in
             Task { @MainActor in self?.castConnectionChanged(to: deviceName) }
@@ -196,13 +251,36 @@ final class PlayerCoordinator: NSObject, ObservableObject {
         }
     }
 
-    func play(items: [JFItem], startAt startIndex: Int = 0) {
-        let tracks = makeTracks(items)
+    /// - Parameters:
+    ///   - startIndex: the track to start on. `nil` means the first — or, when
+    ///     shuffling, a random one.
+    ///   - shuffle: `true` for a Shuffle button, `false` for a Play button;
+    ///   `nil` (tapping a single track) keeps whatever mode is on.
+    func play(items: [JFItem], startAt startIndex: Int? = nil, shuffle: Bool? = nil) {
+        var tracks = makeTracks(items)
         guard !tracks.isEmpty else { return }
+
+        let shuffle = shuffle ?? isShuffled
+        if shuffle != isShuffled { setShuffleFlag(shuffle) }
+
+        var start = max(0, min(startIndex ?? 0, tracks.count - 1))
+        if shuffle {
+            unshuffledOrder = tracks.map(\.entryId)
+            if let startIndex {
+                // The tapped track first, then everything else at random.
+                let chosen = tracks.remove(at: max(0, min(startIndex, tracks.count - 1)))
+                tracks = [chosen] + tracks.shuffled()
+            } else {
+                tracks.shuffle()
+            }
+            start = 0
+        } else {
+            unshuffledOrder = []
+        }
 
         playSessionId = UUID().uuidString
         queue = tracks
-        index = max(0, min(startIndex, tracks.count - 1))
+        index = start
         position = 0
         duration = tracks[index].duration
         engine.load(queue: tracks, startIndex: index)
@@ -234,6 +312,19 @@ final class PlayerCoordinator: NSObject, ObservableObject {
         }
 
         let target = max(0, min(insertIndex, queue.count))
+        if isShuffled {
+            // Unshuffling should leave added tracks where they'd naturally be:
+            // appended ones at the end, "play next" ones after their neighbour.
+            let ids = tracks.map(\.entryId)
+            if target < queue.count, target > 0,
+               let anchor = unshuffledOrder.firstIndex(of: queue[target - 1].entryId) {
+                unshuffledOrder.insert(contentsOf: ids, at: anchor + 1)
+            } else if target == 0 {
+                unshuffledOrder.insert(contentsOf: ids, at: 0)
+            } else {
+                unshuffledOrder.append(contentsOf: ids)
+            }
+        }
         queue.insert(contentsOf: tracks, at: target)
         if target <= index { index += tracks.count }
         engine.insert(tracks, at: target)
@@ -243,7 +334,8 @@ final class PlayerCoordinator: NSObject, ObservableObject {
         guard queue.indices.contains(removeIndex) else { return }
         let wasCurrent = removeIndex == index
 
-        queue.remove(at: removeIndex)
+        let removed = queue.remove(at: removeIndex)
+        unshuffledOrder.removeAll { $0 == removed.entryId }
         engine.remove(at: removeIndex)
 
         if queue.isEmpty {
@@ -306,6 +398,7 @@ final class PlayerCoordinator: NSObject, ObservableObject {
     func clearQueue() {
         engine.stop()
         queue = []
+        unshuffledOrder = []
         index = 0
         position = 0
         duration = 0
@@ -327,6 +420,144 @@ final class PlayerCoordinator: NSObject, ObservableObject {
     func next() { engine.next() }
     func previous() { engine.previous() }
 
+    /// Jumps within the current track; negative goes back.
+    func skip(by seconds: TimeInterval) {
+        guard currentTrack != nil, state != .idle else { return }
+        let end = duration > 0 ? duration : .greatestFiniteMagnitude
+        seek(to: min(max(0, position + seconds), end))
+    }
+
+    // MARK: - Instant Mix
+
+    /// Replaces the queue with a radio-style mix the server builds around `item`.
+    func playInstantMix(from item: JFItem) async {
+        guard let client else { return }
+        do {
+            let mix = try await client.instantMix(from: item.id)
+            guard !mix.isEmpty else {
+                errorMessage = "Jellyfin couldn't build a mix from “\(item.name)”."
+                return
+            }
+            // The server already orders a mix to flow; shuffling would undo that.
+            play(items: mix, shuffle: false)
+        } catch {
+            errorMessage = "Couldn't start a mix. \((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Sleep timer
+
+    func setSleepTimer(minutes: Int) {
+        sleepTask?.cancel()
+        let deadline = Date().addingTimeInterval(TimeInterval(minutes * 60))
+        sleepTimer = .at(deadline)
+        sleepTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(minutes * 60))
+            guard !Task.isCancelled else { return }
+            self?.fallAsleep()
+        }
+    }
+
+    /// Stops when the playing track ends rather than cutting it off mid-song.
+    func sleepAtEndOfTrack() {
+        sleepTask?.cancel()
+        sleepTimer = .endOfTrack
+    }
+
+    func cancelSleepTimer() {
+        sleepTask?.cancel()
+        sleepTimer = .off
+    }
+
+    private func fallAsleep() {
+        sleepTimer = .off
+        if isPlaying { engine.pause() }
+    }
+
+    // MARK: - Volume levelling
+
+    func setLevelling(_ enabled: Bool) {
+        localPlayer.setLevelling(enabled)
+        castEngine.setLevelling(enabled)
+    }
+
+    // MARK: - Shuffle and repeat
+
+    func toggleShuffle() { setShuffle(!isShuffled) }
+
+    /// Shuffling keeps the playing track playing and randomizes everything
+    /// else after it; unshuffling restores the original order around it.
+    func setShuffle(_ on: Bool) {
+        guard on != isShuffled else { return }
+        setShuffleFlag(on)
+
+        guard let current = currentTrack else {
+            unshuffledOrder = []
+            return
+        }
+
+        let reordered: [PlaybackTrack]
+        if on {
+            unshuffledOrder = queue.map(\.entryId)
+            var rest = queue
+            rest.remove(at: index)
+            reordered = [current] + rest.shuffled()
+        } else {
+            let byEntry = Dictionary(queue.map { ($0.entryId, $0) }, uniquingKeysWith: { first, _ in first })
+            let known = Set(unshuffledOrder)
+            reordered = unshuffledOrder.compactMap { byEntry[$0] }
+                + queue.filter { !known.contains($0.entryId) }
+            unshuffledOrder = []
+        }
+
+        let newIndex = reordered.firstIndex { $0.entryId == current.entryId } ?? 0
+        queue = reordered
+        index = newIndex
+        // Once playback has ended the engine holds no queue; play reloads it.
+        if state != .idle { engine.reorder(reordered, index: newIndex) }
+    }
+
+    func cycleRepeatMode() { setRepeatMode(repeatMode.next) }
+
+    func setRepeatMode(_ mode: RepeatMode) {
+        repeatMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: Self.repeatKey)
+        localPlayer.setRepeatMode(mode)
+        castEngine.setRepeatMode(mode)
+        MPRemoteCommandCenter.shared().changeRepeatModeCommand.currentRepeatType = mode.remoteType
+    }
+
+    private func setShuffleFlag(_ on: Bool) {
+        isShuffled = on
+        UserDefaults.standard.set(on, forKey: Self.shuffleKey)
+        MPRemoteCommandCenter.shared().changeShuffleModeCommand.currentShuffleType = on ? .items : .off
+    }
+
+    /// CarPlay's shuffle and repeat buttons, and Siri, arrive here. They need
+    /// the coordinator rather than an engine because they reorder the queue.
+    private func configureModeCommands() {
+        let center = MPRemoteCommandCenter.shared()
+        center.changeShuffleModeCommand.currentShuffleType = isShuffled ? .items : .off
+        center.changeRepeatModeCommand.currentRepeatType = repeatMode.remoteType
+
+        center.changeShuffleModeCommand.addTarget { [weak self] event in
+            guard let event = event as? MPChangeShuffleModeCommandEvent else { return .commandFailed }
+            Task { @MainActor in self?.setShuffle(event.shuffleType != .off) }
+            return .success
+        }
+        center.changeRepeatModeCommand.addTarget { [weak self] event in
+            guard let event = event as? MPChangeRepeatModeCommandEvent else { return .commandFailed }
+            let mode: RepeatMode
+            switch event.repeatType {
+            case .one: mode = .one
+            case .all: mode = .all
+            default: mode = .off
+            }
+            Task { @MainActor in self?.setRepeatMode(mode) }
+            return .success
+        }
+    }
+
     func seek(to newPosition: TimeInterval) {
         position = newPosition
         engine.seek(to: newPosition)
@@ -344,6 +575,7 @@ final class PlayerCoordinator: NSObject, ObservableObject {
     func shutdown() {
         engine.stop()
         queue = []
+        unshuffledOrder = []
         index = 0
         state = .idle
     }
@@ -397,10 +629,12 @@ extension PlayerCoordinator: PlaybackEngineDelegate {
 
     nonisolated func engine(_ engine: PlaybackEngine, didChangeIndex index: Int) {
         Task { @MainActor in
+            let moved = index != self.index
             self.index = index
             self.position = 0
             self.duration = self.currentTrack?.duration ?? 0
             self.reportStartIfNeeded()
+            if moved, self.sleepTimer == .endOfTrack { self.fallAsleep() }
         }
     }
 
@@ -416,10 +650,27 @@ extension PlayerCoordinator: PlaybackEngineDelegate {
         Task { @MainActor in
             self.reportStopped()
             self.state = .idle
+            if self.sleepTimer == .endOfTrack { self.cancelSleepTimer() }
         }
     }
 
     nonisolated func engine(_ engine: PlaybackEngine, didFail message: String) {
         Task { @MainActor in self.errorMessage = message }
     }
+}
+
+private extension RepeatMode {
+    var remoteType: MPRepeatType {
+        switch self {
+        case .off: return .off
+        case .all: return .all
+        case .one: return .one
+        }
+    }
+}
+
+enum SleepTimer: Equatable {
+    case off
+    case at(Date)
+    case endOfTrack
 }

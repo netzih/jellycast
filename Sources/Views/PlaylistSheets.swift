@@ -8,6 +8,16 @@ enum TrackSource {
     case album(JFItem)
     case artist(JFItem)
 
+    /// The one library item this stands for, when there is one — what a heart
+    /// or an Instant Mix acts on. A batch of tracks has no single identity.
+    var item: JFItem? {
+        switch self {
+        case .album(let album): return album
+        case .artist(let artist): return artist
+        case .tracks(let items): return items.count == 1 ? items[0] : nil
+        }
+    }
+
     func resolve(using client: JellyfinClient) async -> [JFItem] {
         switch self {
         case .tracks(let items):
@@ -49,7 +59,23 @@ private struct TrackActionsModifier: ViewModifier {
             } label: {
                 Label("Add to queue", systemImage: "text.append")
             }
+            if let item = source.item {
+                Button {
+                    Task { await appState.player.playInstantMix(from: item) }
+                } label: {
+                    Label("Start Instant Mix", systemImage: "dot.radiowaves.left.and.right")
+                }
+            }
             Divider()
+            if let item = source.item {
+                let favorite = appState.isFavorite(item)
+                Button {
+                    appState.toggleFavorite(item)
+                } label: {
+                    Label(favorite ? "Remove from favorites" : "Favorite",
+                          systemImage: favorite ? "heart.slash" : "heart")
+                }
+            }
             Button {
                 target = PlaylistTarget(source: source, title: title)
             } label: {
@@ -69,7 +95,7 @@ private struct TrackActionsModifier: ViewModifier {
 }
 
 extension View {
-    /// Long-press actions: play next, add to queue, add to playlist.
+    /// Long-press actions: play next, add to queue, Instant Mix, favorite, add to playlist.
     func trackActions(
         _ source: TrackSource,
         title: String,

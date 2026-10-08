@@ -17,7 +17,7 @@
 	<key>provisioningProfiles</key>
 	<dict>
 		<key>com.yitzchokwagner.jellycast</key>
-		<string>REPLACE_WITH_APP_STORE_PROFILE_NAME</string>
+		<string>JellyCast App Store</string>
 	</dict>
 	<key>uploadSymbols</key>
 	<true/>

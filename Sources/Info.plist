@@ -20,6 +20,14 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>INIntentsSupported</key>
+	<array>
+		<string>INPlayMediaIntent</string>
+	</array>
+	<key>INSupportedMediaCategories</key>
+	<array>
+		<string>INMediaCategoryMusic</string>
+	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
@@ -36,6 +44,8 @@
 		<string>_googlecast._tcp</string>
 		<string>_CC1AD845._googlecast._tcp</string>
 	</array>
+	<key>NSSiriUsageDescription</key>
+	<string>Lets you ask Siri to play an artist, album, playlist or song from your Jellyfin library.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>JellyCast finds Google Home and Chromecast speakers on your Wi-Fi network, and connects to your Jellyfin server.</string>
 	<key>UIApplicationSceneManifest</key>

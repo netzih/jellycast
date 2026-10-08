@@ -76,6 +76,11 @@ struct JFItem: Decodable, Identifiable, Hashable {
     let imageTags: [String: String]?
     let albumPrimaryImageTag: String?
 
+    /// Per-user state — favorite, play count. Jellyfin includes it on user-scoped queries.
+    let userData: JFUserData?
+    /// Loudness correction in dB the server computed (Jellyfin 10.9+); negative means "turn down".
+    let normalizationGain: Double?
+
     // MARK: Derived
 
     var displayArtist: String {
@@ -126,6 +131,11 @@ struct JFItem: Decodable, Identifiable, Hashable {
         hasher.combine(id)
         hasher.combine(playlistItemId)
     }
+}
+
+struct JFUserData: Decodable, Hashable {
+    let isFavorite: Bool?
+    let playCount: Int?
 }
 
 /// `POST /Playlists` replies with just the new playlist's id.

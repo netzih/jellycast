@@ -116,6 +116,7 @@ struct MiniPlayer: View {
             .overlay(alignment: .top) { Divider() }
             .sheet(isPresented: $showFullPlayer) {
                 NowPlayingView(player: player)
+                    .environmentObject(AppState.shared)
             }
         }
     }

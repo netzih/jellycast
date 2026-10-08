@@ -10,6 +10,8 @@ final class LocalPlayer: NSObject, PlaybackEngine {
     private let player = AVPlayer()
     private var queue: [PlaybackTrack] = []
     private var index = 0
+    private var repeatMode: RepeatMode = .off
+    private var levelling = false
     private var timeObserver: Any?
     private var artworkTask: Task<Void, Never>?
     private var didConfigureCommands = false
@@ -81,7 +83,13 @@ final class LocalPlayer: NSObject, PlaybackEngine {
     }
 
     func next() {
+        guard !queue.isEmpty else { return }
         guard index + 1 < queue.count else {
+            if repeatMode != .off {
+                index = 0
+                startCurrentItem()
+                return
+            }
             stop()
             delegate?.engineDidFinishQueue(self)
             return
@@ -127,6 +135,25 @@ final class LocalPlayer: NSObject, PlaybackEngine {
         delegate?.engine(self, didChangeState: .idle)
     }
 
+    func setRepeatMode(_ mode: RepeatMode) {
+        repeatMode = mode
+    }
+
+    func setLevelling(_ enabled: Bool) {
+        levelling = enabled
+        applyLevelling()
+    }
+
+    /// AVPlayer.volume is this app's own gain, separate from the system
+    /// volume the buttons and the car control — so this never fights them.
+    private func applyLevelling() {
+        guard levelling, queue.indices.contains(index) else {
+            player.volume = 1
+            return
+        }
+        player.volume = queue[index].levellingVolume
+    }
+
     // MARK: - Queue editing
     //
     // These keep the engine's own array in step with the coordinator's, which
@@ -139,6 +166,7 @@ final class LocalPlayer: NSObject, PlaybackEngine {
         let target = max(0, min(insertIndex, queue.count))
         queue.insert(contentsOf: newTracks, at: target)
         if target <= index { index += newTracks.count }
+        updateNowPlayingQueuePosition()
     }
 
     func remove(at removeIndex: Int) {
@@ -183,6 +211,7 @@ final class LocalPlayer: NSObject, PlaybackEngine {
         } else if oldIndex > index && target <= index {
             index += 1
         }
+        updateNowPlayingQueuePosition()
     }
 
     func jump(to newIndex: Int) {
@@ -190,6 +219,13 @@ final class LocalPlayer: NSObject, PlaybackEngine {
         index = newIndex
         activateSession()
         startCurrentItem()
+    }
+
+    func reorder(_ newQueue: [PlaybackTrack], index newIndex: Int) {
+        guard newQueue.indices.contains(newIndex) else { return }
+        queue = newQueue
+        index = newIndex
+        updateNowPlayingQueuePosition()
     }
 
     // MARK: - Internals
@@ -200,6 +236,7 @@ final class LocalPlayer: NSObject, PlaybackEngine {
         let asset = AVURLAsset(url: track.streamURL)
         let item = AVPlayerItem(asset: asset)
         player.replaceCurrentItem(with: item)
+        applyLevelling()
         player.play()
 
         delegate?.engine(self, didChangeIndex: index)
@@ -221,7 +258,12 @@ final class LocalPlayer: NSObject, PlaybackEngine {
 
     @objc private func itemDidPlayToEnd(_ note: Notification) {
         guard (note.object as? AVPlayerItem) === player.currentItem else { return }
-        next()
+        if repeatMode == .one {
+            seek(to: 0)
+            player.play()
+        } else {
+            next()
+        }
     }
 
     @objc private func itemFailedToPlay(_ note: Notification) {
@@ -258,6 +300,9 @@ final class LocalPlayer: NSObject, PlaybackEngine {
             MPNowPlayingInfoPropertyElapsedPlaybackTime: 0,
             MPNowPlayingInfoPropertyPlaybackRate: 1.0,
             MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
+            // CarPlay shows these as "3 of 12".
+            MPNowPlayingInfoPropertyPlaybackQueueIndex: index,
+            MPNowPlayingInfoPropertyPlaybackQueueCount: queue.count,
         ]
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
 
@@ -269,8 +314,10 @@ final class LocalPlayer: NSObject, PlaybackEngine {
                   !Task.isCancelled else { return }
             let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
             await MainActor.run {
-                guard self != nil else { return }
+                guard let self else { return }
                 info[MPMediaItemPropertyArtwork] = artwork
+                info[MPNowPlayingInfoPropertyPlaybackQueueIndex] = self.index
+                info[MPNowPlayingInfoPropertyPlaybackQueueCount] = self.queue.count
                 // Only apply if the same track is still current.
                 let current = MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String
                 if current == track.title {
@@ -278,6 +325,11 @@ final class LocalPlayer: NSObject, PlaybackEngine {
                 }
             }
         }
+    }
+
+    private func updateNowPlayingQueuePosition() {
+        MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackQueueIndex] = index
+        MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackQueueCount] = queue.count
     }
 
     private func updateNowPlayingPlaybackState() {
