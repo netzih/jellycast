@@ -30,6 +30,15 @@ struct NowPlayingView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                    if let label = player.currentTrack?.sourceLabel {
+                        Text(label)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 2)
+                            .background(.quaternary, in: Capsule())
+                            .padding(.top, 4)
+                    }
                 }
                 .padding(.horizontal, 24)
 

@@ -6,9 +6,12 @@ struct PlaybackTrack: Identifiable, Equatable {
     let streamURL: URL
     let contentType: String
     let artworkURL: URL?
+    /// "Downloaded · FLAC", "Streaming · MP3 192" — for the quality badge.
+    let sourceLabel: String
     /// Identifies this queue entry, not the song — the same song can be queued
-    /// twice, and shuffle has to put each copy back where it came from.
-    let entryId = UUID()
+    /// twice, and shuffle has to put each copy back where it came from. A
+    /// `var` so a track rebuilt for another output keeps its identity.
+    var entryId = UUID()
 
     var id: String { item.id }
     var title: String { item.name }

@@ -47,7 +47,9 @@ struct ItemsResponse: Decodable {
     let totalRecordCount: Int?
 }
 
-struct JFItem: Decodable, Identifiable, Hashable {
+/// Codable so downloads can keep it on disk. Encoded with plain camelCase keys,
+/// which `JSONDecoder.jellyfin` reads back unchanged (it only lowercases the first letter).
+struct JFItem: Codable, Identifiable, Hashable {
     let id: String
     let name: String
     let type: String?
@@ -133,9 +135,16 @@ struct JFItem: Decodable, Identifiable, Hashable {
     }
 }
 
-struct JFUserData: Decodable, Hashable {
+struct JFUserData: Codable, Hashable {
     let isFavorite: Bool?
     let playCount: Int?
+}
+
+/// `/QuickConnect/Initiate` and `/QuickConnect/Connect`.
+struct QuickConnectResult: Decodable {
+    let secret: String
+    let code: String
+    let authenticated: Bool
 }
 
 /// `POST /Playlists` replies with just the new playlist's id.
@@ -143,12 +152,12 @@ struct PlaylistCreationResult: Decodable {
     let id: String
 }
 
-struct JFMediaSource: Decodable, Hashable {
+struct JFMediaSource: Codable, Hashable {
     let container: String?
     let mediaStreams: [JFMediaStream]?
 }
 
-struct JFMediaStream: Decodable, Hashable {
+struct JFMediaStream: Codable, Hashable {
     let type: String?
     let codec: String?
 }

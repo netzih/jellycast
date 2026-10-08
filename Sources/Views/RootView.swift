@@ -63,6 +63,7 @@ struct LoginView: View {
     @State private var password = ""
     @State private var isWorking = false
     @State private var errorText: String?
+    @State private var showQuickConnect = false
 
     var body: some View {
         NavigationStack {
@@ -109,8 +110,23 @@ struct LoginView: View {
                     }
                     .disabled(isWorking || server.isEmpty || username.isEmpty)
                 }
+
+                Section {
+                    Button {
+                        errorText = nil
+                        showQuickConnect = true
+                    } label: {
+                        Label("Sign in with Quick Connect", systemImage: "qrcode")
+                    }
+                    .disabled(isWorking || server.isEmpty)
+                } footer: {
+                    Text("No password needed: you'll get a code to approve from a phone or computer that's already signed in.")
+                }
             }
             .navigationTitle("JellyCast")
+            .sheet(isPresented: $showQuickConnect) {
+                QuickConnectSignInSheet(server: server).environmentObject(appState)
+            }
         }
     }
 
@@ -128,6 +144,7 @@ struct LoginView: View {
 
 struct SettingsTab: View {
     @EnvironmentObject var appState: AppState
+    @ObservedObject private var downloads = DownloadStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var confirmSignOut = false
 
@@ -152,17 +169,25 @@ struct SettingsTab: View {
                 }
 
                 Section {
-                    Picker("Quality", selection: $appState.streamQuality) {
-                        ForEach(StreamQuality.allCases) { quality in
-                            Text(quality.label).tag(quality)
-                        }
-                    }
-                    .pickerStyle(.inline)
-                    .labelsHidden()
+                    qualityPicker("Wi-Fi and speakers", selection: $appState.streamQuality)
+                    qualityPicker("Mobile data", selection: $appState.cellularQuality)
                 } header: {
                     Text("Streaming")
                 } footer: {
-                    Text(appState.streamQuality.detail)
+                    Text("Mobile data applies when this iPhone plays without Wi-Fi — usually in the car. Changes apply from the next song you start. \(appState.cellularQuality.detail)")
+                }
+
+                Section {
+                    qualityPicker("Download quality", selection: $appState.downloadQuality)
+                    NavigationLink {
+                        DownloadsView()
+                    } label: {
+                        LabeledContent("Downloads", value: downloadSummary)
+                    }
+                } header: {
+                    Text("Downloads")
+                } footer: {
+                    Text("Downloaded songs play from this iPhone, with or without signal. Original keeps FLAC untouched — about 30 MB a song. Changing quality affects new downloads only.")
                 }
 
                 Section {
@@ -173,8 +198,22 @@ struct SettingsTab: View {
                     Text("Turns loud tracks down to match quieter ones, using the loudness your Jellyfin server measured. Works on this iPhone, in the car and on speakers.")
                 }
 
+                Section {
+                    Picker("Swipe right", selection: $appState.swipeRight) {
+                        ForEach(SwipeAction.allCases) { Label($0.label, systemImage: $0.systemImage).tag($0) }
+                    }
+                    Picker("Swipe left", selection: $appState.swipeLeft) {
+                        ForEach(SwipeAction.allCases) { Label($0.label, systemImage: $0.systemImage).tag($0) }
+                    }
+                } header: {
+                    Text("Swipe actions")
+                } footer: {
+                    Text("What swiping a song in an album, playlist or search does.")
+                }
+
                 Section("Account") {
                     LabeledContent("Signed in as", value: appState.userName)
+                    NavigationLink("Sign in another device") { AuthorizeDeviceView() }
                     Button("Sign out", role: .destructive) { confirmSignOut = true }
                 }
             }
@@ -194,5 +233,19 @@ struct SettingsTab: View {
                 Text("Playback will stop and you'll need your password to sign back in.")
             }
         }
+    }
+
+    private func qualityPicker(_ title: String, selection: Binding<StreamQuality>) -> some View {
+        Picker(title, selection: selection) {
+            ForEach(StreamQuality.allCases) { quality in
+                Text(quality.label).tag(quality)
+            }
+        }
+        .pickerStyle(.menu)
+    }
+
+    private var downloadSummary: String {
+        guard !downloads.downloaded.isEmpty else { return "None" }
+        return "\(downloads.downloaded.count) songs · \(ByteCountFormatter.string(fromByteCount: downloads.totalBytes, countStyle: .file))"
     }
 }

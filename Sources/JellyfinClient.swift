@@ -1,24 +1,102 @@
 import Foundation
 
-/// How audio is delivered to the Cast device.
+/// How audio is delivered — streamed, cast or downloaded.
 enum StreamQuality: String, CaseIterable, Identifiable {
     case original = "original"
-    case mp3 = "mp3"
+    /// Raw value kept from when this was the only converted option.
+    case high = "mp3"
+    case medium = "mp3_192"
+    case low = "mp3_128"
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .original: return "Original quality"
-        case .mp3: return "MP3 320 (max compatibility)"
+        case .original: return "Original"
+        case .high: return "High · 320 kbps"
+        case .medium: return "Medium · 192 kbps"
+        case .low: return "Low · 128 kbps"
         }
     }
 
     var detail: String {
         switch self {
-        case .original: return "Sends FLAC, MP3 and AAC untouched. Falls back to MP3 for formats the speaker can't play."
-        case .mp3: return "Always converts on the server. Use this if some tracks refuse to play."
+        case .original:
+            return "Plays FLAC, MP3 and AAC untouched. Anything else is converted to MP3 320."
+        case .high:
+            return "Always converted to MP3 on the server. Use this if some tracks refuse to play."
+        case .medium:
+            return "About 1.4 MB a minute. Hard to tell apart from High in a car."
+        case .low:
+            return "About 1 MB a minute. Easiest on mobile data and weak signal."
         }
+    }
+
+    /// Bits per second to convert to; `nil` for untouched originals.
+    var bitrate: Int? {
+        switch self {
+        case .original: return nil
+        case .high: return 320_000
+        case .medium: return 192_000
+        case .low: return 128_000
+        }
+    }
+}
+
+/// How the Albums and Artists lists are ordered.
+struct LibrarySort: Equatable {
+    enum Field: String, CaseIterable, Identifiable {
+        case name, artist, dateAdded, year, random
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .name: return "Name"
+            case .artist: return "Artist"
+            case .dateAdded: return "Recently added"
+            case .year: return "Year"
+            case .random: return "Random"
+            }
+        }
+
+        /// Newest-first reads naturally for dates; A→Z for everything else.
+        var defaultAscending: Bool { !(self == .dateAdded || self == .year) }
+
+        /// Jellyfin `sortBy`. A secondary SortName keeps ties in a stable order.
+        var jellyfinSortBy: String {
+            switch self {
+            case .name: return "SortName"
+            case .artist: return "AlbumArtist,SortName"
+            case .dateAdded: return "DateCreated,SortName"
+            case .year: return "ProductionYear,SortName"
+            case .random: return "Random"
+            }
+        }
+
+        /// Artists have no artist or year of their own.
+        static func available(for kind: LibraryKind) -> [Field] {
+            kind == .artists ? [.name, .dateAdded, .random] : allCases
+        }
+    }
+
+    var field: Field
+    var ascending: Bool
+
+    static let byName = LibrarySort(field: .name, ascending: true)
+
+    /// "name:asc" — for UserDefaults.
+    var rawValue: String { "\(field.rawValue):\(ascending ? "asc" : "desc")" }
+
+    init(field: Field, ascending: Bool) {
+        self.field = field
+        self.ascending = ascending
+    }
+
+    init?(rawValue: String) {
+        let parts = rawValue.split(separator: ":")
+        guard parts.count == 2, let field = Field(rawValue: String(parts[0])) else { return nil }
+        self.init(field: field, ascending: parts[1] == "asc")
     }
 }
 
@@ -100,7 +178,74 @@ final class JellyfinClient {
         guard (200..<300).contains(code) else {
             throw JellyfinError.http(code, String(data: data.prefix(200), encoding: .utf8) ?? "")
         }
+        return try session(from: data, baseURL: baseURL)
+    }
 
+    // MARK: - Quick Connect
+    //
+    // Signing in without a password: this device gets a short code, someone
+    // already signed in approves it (Jellyfin's web app, or JellyCast on
+    // another phone), and the secret then trades for a session.
+
+    /// Unauthenticated request against a server we don't have a session for yet.
+    private static func anonymous(_ method: String, _ baseURL: URL, _ path: String,
+                                  query: [URLQueryItem] = [], body: [String: Any]? = nil) async throws -> Data {
+        var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
+        if !query.isEmpty { components.queryItems = query }
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = method
+        request.timeoutInterval = 15
+        request.setValue(authHeader(token: nil), forHTTPHeaderField: "Authorization")
+        if let body {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(code) else {
+            throw JellyfinError.http(code, String(data: data.prefix(200), encoding: .utf8) ?? "")
+        }
+        return data
+    }
+
+    static func quickConnectEnabled(server: String) async throws -> Bool {
+        guard let baseURL = normalizeServerURL(server) else { throw JellyfinError.badURL }
+        let data = try await anonymous("GET", baseURL, "QuickConnect/Enabled")
+        return (try? JSONDecoder().decode(Bool.self, from: data)) ?? false
+    }
+
+    /// Starts a request; show `code` to the person, keep `secret` to poll with.
+    static func initiateQuickConnect(server: String) async throws -> (baseURL: URL, code: String, secret: String) {
+        guard let baseURL = normalizeServerURL(server) else { throw JellyfinError.badURL }
+        let data: Data
+        do {
+            data = try await anonymous("POST", baseURL, "QuickConnect/Initiate")
+        } catch JellyfinError.http(let status, _) where status == 404 || status == 405 {
+            // Before 10.9 this was a GET.
+            data = try await anonymous("GET", baseURL, "QuickConnect/Initiate")
+        }
+        let result = try JSONDecoder.jellyfin.decode(QuickConnectResult.self, from: data)
+        return (baseURL, result.code, result.secret)
+    }
+
+    /// True once someone has approved the code.
+    static func quickConnectApproved(baseURL: URL, secret: String) async throws -> Bool {
+        let data = try await anonymous("GET", baseURL, "QuickConnect/Connect",
+                                       query: [URLQueryItem(name: "secret", value: secret)])
+        return try JSONDecoder.jellyfin.decode(QuickConnectResult.self, from: data).authenticated
+    }
+
+    static func logIn(baseURL: URL, quickConnectSecret secret: String) async throws -> JellyfinSession {
+        let data = try await anonymous("POST", baseURL, "Users/AuthenticateWithQuickConnect", body: ["Secret": secret])
+        return try session(from: data, baseURL: baseURL)
+    }
+
+    /// Approves a code shown on another device; it signs in as this user.
+    func authorizeQuickConnect(code: String) async throws {
+        try await send("POST", "QuickConnect/Authorize", query: ["code": code, "userId": session.userId])
+    }
+
+    private static func session(from data: Data, baseURL: URL) throws -> JellyfinSession {
         do {
             let auth = try JSONDecoder.jellyfin.decode(AuthResponse.self, from: data)
             return JellyfinSession(
@@ -202,14 +347,16 @@ final class JellyfinClient {
         return musical.isEmpty ? response.items : musical
     }
 
-    func albums(startIndex: Int = 0, limit: Int = 200) async throws -> [JFItem] {
+    func albums(startIndex: Int = 0, limit: Int = 200,
+                sort: LibrarySort = .byName, genreId: String? = nil) async throws -> [JFItem] {
         let response: ItemsResponse = try await get("Items", query: [
             "userId": session.userId,
             "includeItemTypes": "MusicAlbum",
             "recursive": "true",
             "parentId": libraryId,
-            "sortBy": "SortName",
-            "sortOrder": "Ascending",
+            "genreIds": genreId,
+            "sortBy": sort.field.jellyfinSortBy,
+            "sortOrder": sort.ascending ? "Ascending" : "Descending",
             "startIndex": String(startIndex),
             "limit": String(limit),
             "fields": "PrimaryImageAspectRatio",
@@ -217,12 +364,12 @@ final class JellyfinClient {
         return response.items
     }
 
-    func artists(startIndex: Int = 0, limit: Int = 200) async throws -> [JFItem] {
+    func artists(startIndex: Int = 0, limit: Int = 200, sort: LibrarySort = .byName) async throws -> [JFItem] {
         let response: ItemsResponse = try await get("Artists", query: [
             "userId": session.userId,
             "parentId": libraryId,
-            "sortBy": "SortName",
-            "sortOrder": "Ascending",
+            "sortBy": sort.field.jellyfinSortBy,
+            "sortOrder": sort.ascending ? "Ascending" : "Descending",
             "startIndex": String(startIndex),
             "limit": String(limit),
         ])
@@ -369,6 +516,29 @@ final class JellyfinClient {
         }
     }
 
+    // MARK: - Genres
+
+    /// Music genres in the current library — empty when nothing is tagged.
+    func genres() async throws -> [JFItem] {
+        let response: ItemsResponse = try await get("MusicGenres", query: [
+            "userId": session.userId,
+            "parentId": libraryId,
+            "sortBy": "SortName",
+        ])
+        return response.items
+    }
+
+    // MARK: - Similar
+
+    /// Artists, albums or songs the server considers alike — works on any item.
+    func similar(to itemId: String, limit: Int = 12) async throws -> [JFItem] {
+        let response: ItemsResponse = try await get("Items/\(itemId)/Similar", query: [
+            "userId": session.userId,
+            "limit": String(limit),
+        ])
+        return response.items
+    }
+
     // MARK: - Instant Mix
 
     /// A radio-style list the server builds from any song, album, artist or
@@ -502,19 +672,25 @@ final class JellyfinClient {
         return true
     }
 
-    /// Returns the URL the speaker should fetch, plus its MIME type.
-    func streamInfo(for item: JFItem, quality: StreamQuality) -> (url: URL, contentType: String) {
+    /// Returns the URL to fetch, its MIME type, and a short label for the
+    /// quality badge ("FLAC", "MP3 192").
+    func streamInfo(for item: JFItem, quality: StreamQuality) -> (url: URL, contentType: String, label: String) {
         if quality == .original, canDirectPlay(item), let container = item.sourceContainer {
             let url = makeURL("Audio/\(item.id)/stream.\(container)", [
                 "static": "true",
                 "api_key": session.accessToken,
                 "deviceId": Self.deviceId,
             ])
-            return (url, Self.contentType(forContainer: container))
+            return (url, Self.contentType(forContainer: container), Self.formatLabel(for: item))
         }
 
         // Server-side transcode to a format every Cast receiver accepts.
-        let url = makeURL("Audio/\(item.id)/universal", [
+        let bitrate = quality.bitrate ?? 320_000
+        return (transcodeURL(for: item, bitrate: bitrate), "audio/mpeg", "MP3 \(bitrate / 1000)")
+    }
+
+    private func transcodeURL(for item: JFItem, bitrate: Int) -> URL {
+        makeURL("Audio/\(item.id)/universal", [
             "api_key": session.accessToken,
             "userId": session.userId,
             "deviceId": Self.deviceId,
@@ -522,9 +698,33 @@ final class JellyfinClient {
             "audioCodec": "mp3",
             "transcodingContainer": "mp3",
             "transcodingProtocol": "http",
-            "maxStreamingBitrate": "320000",
+            "maxStreamingBitrate": String(bitrate),
+            "audioBitRate": String(bitrate),
         ])
-        return (url, "audio/mpeg")
+    }
+
+    /// Formats iOS itself plays from a file. Wider than what Cast takes:
+    /// downloads only ever play on this phone.
+    private static let locallyPlayableContainers: Set<String> = ["mp3", "m4a", "mp4", "aac", "flac", "wav"]
+
+    /// Where to download a track from, and the file extension to keep it under.
+    func downloadInfo(for item: JFItem, quality: StreamQuality) -> (url: URL, fileExtension: String, label: String) {
+        if quality == .original, let container = item.sourceContainer,
+           Self.locallyPlayableContainers.contains(container) {
+            let url = makeURL("Audio/\(item.id)/stream.\(container)", [
+                "static": "true",
+                "api_key": session.accessToken,
+                "deviceId": Self.deviceId,
+            ])
+            return (url, container, Self.formatLabel(for: item))
+        }
+        let bitrate = quality.bitrate ?? 320_000
+        return (transcodeURL(for: item, bitrate: bitrate), "mp3", "MP3 \(bitrate / 1000)")
+    }
+
+    /// "FLAC", "AAC", "MP3" — the codec if the server said, else the container.
+    static func formatLabel(for item: JFItem) -> String {
+        (item.sourceAudioCodec ?? item.sourceContainer ?? "audio").uppercased()
     }
 
     func artworkURL(for item: JFItem, maxHeight: Int = 512) -> URL? {

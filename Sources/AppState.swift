@@ -13,12 +13,37 @@ final class AppState: ObservableObject {
     @Published var streamQuality: StreamQuality {
         didSet { UserDefaults.standard.set(streamQuality.rawValue, forKey: Self.qualityKey) }
     }
+    /// Used instead of `streamQuality` when playing on this phone over mobile data.
+    @Published var cellularQuality: StreamQuality {
+        didSet { UserDefaults.standard.set(cellularQuality.rawValue, forKey: Self.cellularQualityKey) }
+    }
+    @Published var downloadQuality: StreamQuality {
+        didSet { UserDefaults.standard.set(downloadQuality.rawValue, forKey: Self.downloadQualityKey) }
+    }
     /// Evens out loudness between tracks using Jellyfin's normalization gain.
     @Published var volumeLevelling: Bool {
         didSet {
             UserDefaults.standard.set(volumeLevelling, forKey: Self.levellingKey)
             player.setLevelling(volumeLevelling)
         }
+    }
+
+    @Published var albumSort: LibrarySort {
+        didSet { UserDefaults.standard.set(albumSort.rawValue, forKey: Self.albumSortKey) }
+    }
+    @Published var artistSort: LibrarySort {
+        didSet { UserDefaults.standard.set(artistSort.rawValue, forKey: Self.artistSortKey) }
+    }
+    /// Albums narrowed to one genre, or `nil` for all. Not remembered across
+    /// launches: a forgotten filter would look like missing music.
+    @Published var albumGenreId: String?
+
+    /// What swiping a song row does, each way.
+    @Published var swipeRight: SwipeAction {
+        didSet { UserDefaults.standard.set(swipeRight.rawValue, forKey: Self.swipeRightKey) }
+    }
+    @Published var swipeLeft: SwipeAction {
+        didSet { UserDefaults.standard.set(swipeLeft.rawValue, forKey: Self.swipeLeftKey) }
     }
 
     /// Favorite changes made in this session, by item id. Lists fetched
@@ -34,6 +59,8 @@ final class AppState: ObservableObject {
             guard selectedLibraryId != oldValue else { return }
             UserDefaults.standard.set(selectedLibraryId, forKey: Self.libraryKey)
             client?.libraryId = selectedLibraryId
+            // Genres belong to a library; the old one's filter means nothing here.
+            albumGenreId = nil
         }
     }
 
@@ -43,6 +70,12 @@ final class AppState: ObservableObject {
     private static let qualityKey = "JellyCast.streamQuality"
     private static let libraryKey = "JellyCast.selectedLibraryId"
     private static let levellingKey = "JellyCast.volumeLevelling"
+    private static let cellularQualityKey = "JellyCast.cellularQuality"
+    private static let albumSortKey = "JellyCast.albumSort"
+    private static let artistSortKey = "JellyCast.artistSort"
+    private static let swipeRightKey = "JellyCast.swipeRight"
+    private static let swipeLeftKey = "JellyCast.swipeLeft"
+    private static let downloadQualityKey = "JellyCast.downloadQuality"
 
     /// Name of the current library, for the picker and the browse screens' titles.
     var selectedLibraryName: String? {
@@ -55,10 +88,21 @@ final class AppState: ObservableObject {
 
     private init() {
         let raw = UserDefaults.standard.string(forKey: Self.qualityKey) ?? StreamQuality.original.rawValue
-        streamQuality = StreamQuality(rawValue: raw) ?? .original
+        let wifiQuality = StreamQuality(rawValue: raw) ?? .original
+        streamQuality = wifiQuality
+        // Mobile data defaults to whatever Wi-Fi uses, so nothing changes until asked.
+        cellularQuality = UserDefaults.standard.string(forKey: Self.cellularQualityKey)
+            .flatMap(StreamQuality.init(rawValue:)) ?? wifiQuality
+        downloadQuality = UserDefaults.standard.string(forKey: Self.downloadQualityKey)
+            .flatMap(StreamQuality.init(rawValue:)) ?? .original
 
         selectedLibraryId = UserDefaults.standard.string(forKey: Self.libraryKey)
         volumeLevelling = UserDefaults.standard.bool(forKey: Self.levellingKey)
+        let defaults = UserDefaults.standard
+        albumSort = defaults.string(forKey: Self.albumSortKey).flatMap(LibrarySort.init(rawValue:)) ?? .byName
+        artistSort = defaults.string(forKey: Self.artistSortKey).flatMap(LibrarySort.init(rawValue:)) ?? .byName
+        swipeRight = defaults.string(forKey: Self.swipeRightKey).flatMap(SwipeAction.init(rawValue:)) ?? .playNext
+        swipeLeft = defaults.string(forKey: Self.swipeLeftKey).flatMap(SwipeAction.init(rawValue:)) ?? .addToQueue
         player.setLevelling(volumeLevelling)
 
         if let data = Keychain.load(account: Self.sessionKey),
@@ -84,6 +128,11 @@ final class AppState: ObservableObject {
 
     func signIn(server: String, username: String, password: String) async throws {
         let session = try await JellyfinClient.logIn(server: server, username: username, password: password)
+        await signIn(with: session)
+    }
+
+    /// Finishes any sign-in — password or Quick Connect — once there's a session.
+    func signIn(with session: JellyfinSession) async {
         if let data = try? JSONEncoder().encode(session) {
             Keychain.save(data, account: Self.sessionKey)
         }
@@ -221,9 +270,13 @@ final class PlayerCoordinator: NSObject, ObservableObject {
 
         guard !resumeQueue.isEmpty else { return }
 
+        // Rebuilt for the new output: a speaker can't reach a file on this
+        // phone, and the phone may want a lighter stream than the speaker.
+        let rebuilt = resumeQueue.map { rebuild($0) }
+
         // Hand the queue over and land back on the same spot.
-        engine.load(queue: resumeQueue, startIndex: resumeIndex)
-        queue = resumeQueue
+        engine.load(queue: rebuilt, startIndex: resumeIndex)
+        queue = rebuilt
         index = resumeIndex
         if resumePosition > 2 {
             let target = resumePosition
@@ -238,17 +291,43 @@ final class PlayerCoordinator: NSObject, ObservableObject {
 
     /// Resolves library items into everything an engine needs to play them.
     private func makeTracks(_ items: [JFItem]) -> [PlaybackTrack] {
-        guard let client, let appState else { return [] }
-        let quality = appState.streamQuality
-        return items.map { item in
-            let stream = client.streamInfo(for: item, quality: quality)
+        items.compactMap { makeTrack($0) }
+    }
+
+    private func rebuild(_ track: PlaybackTrack) -> PlaybackTrack {
+        guard var fresh = makeTrack(track.item) else { return track }
+        fresh.entryId = track.entryId
+        return fresh
+    }
+
+    /// A downloaded file when playing on this phone; otherwise a stream at the
+    /// quality for the current connection.
+    private func makeTrack(_ item: JFItem) -> PlaybackTrack? {
+        guard let client, let appState else { return nil }
+        let downloads = DownloadStore.shared
+
+        if !route.isCast, let file = downloads.localURL(for: item.id), let saved = downloads.downloaded[item.id] {
             return PlaybackTrack(
                 item: item,
-                streamURL: stream.url,
-                contentType: stream.contentType,
-                artworkURL: client.artworkURL(for: item)
+                streamURL: file,
+                contentType: "",
+                artworkURL: downloads.localArtworkURL(for: item.id) ?? client.artworkURL(for: item),
+                sourceLabel: "Downloaded · \(saved.formatLabel)"
             )
         }
+
+        let quality = !route.isCast && NetworkMonitor.shared.isExpensive
+            ? appState.cellularQuality : appState.streamQuality
+        let stream = client.streamInfo(for: item, quality: quality)
+        // Mirrors streamInfo: untouched only at Original, and only if playable as-is.
+        let converted = quality != .original || !client.canDirectPlay(item) || item.sourceContainer == nil
+        return PlaybackTrack(
+            item: item,
+            streamURL: stream.url,
+            contentType: stream.contentType,
+            artworkURL: client.artworkURL(for: item),
+            sourceLabel: "\(converted ? "Converted" : "Streaming") · \(stream.label)"
+        )
     }
 
     /// - Parameters:

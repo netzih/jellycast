@@ -5,6 +5,7 @@ import SwiftUI
 /// each time the tab appears, and whenever the library picker changes.
 struct HomeTab: View {
     @EnvironmentObject var appState: AppState
+    @ObservedObject private var downloads = DownloadStore.shared
 
     @State private var recent: [JFItem] = []
     @State private var mostPlayed: [JFItem] = []
@@ -16,8 +17,10 @@ struct HomeTab: View {
     @State private var showSettings = false
     @State private var playlistTarget: PlaylistTarget?
 
+    private var hasDownloads: Bool { !downloads.downloaded.isEmpty || !downloads.active.isEmpty }
+
     private var isEmpty: Bool {
-        recent.isEmpty && mostPlayed.isEmpty && favoriteSongs.isEmpty
+        !hasDownloads && recent.isEmpty && mostPlayed.isEmpty && favoriteSongs.isEmpty
             && favoriteAlbums.isEmpty && favoriteArtists.isEmpty && justAdded.isEmpty
     }
 
@@ -64,6 +67,7 @@ struct HomeTab: View {
     private var content: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
+                if hasDownloads { downloadsLink }
                 if !favoriteSongs.isEmpty { favoriteSongsCard }
                 if !recent.isEmpty {
                     shelf("Recently played") {
@@ -112,6 +116,33 @@ struct HomeTab: View {
     }
 
     // MARK: - Pieces
+
+    /// First on Home: with no signal, it's the only thing that still plays.
+    private var downloadsLink: some View {
+        NavigationLink { DownloadsView() } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Downloads").font(.headline)
+                    Text(downloads.active.isEmpty
+                         ? "\(downloads.downloaded.count) songs on this iPhone"
+                         : "Downloading \(downloads.active.count) songs…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(16)
+            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .padding(.horizontal, 16)
+        }
+        .buttonStyle(.plain)
+    }
 
     private var favoriteSongsCard: some View {
         VStack(alignment: .leading, spacing: 12) {

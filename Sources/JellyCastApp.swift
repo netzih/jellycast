@@ -23,6 +23,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         intent is INPlayMediaIntent ? playMediaHandler : nil
     }
 
+    /// iOS relaunches the app when background downloads finish while it's
+    /// closed; touching the store reattaches to the session to receive them.
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        guard identifier == DownloadStore.sessionIdentifier else { return completionHandler() }
+        Task { @MainActor in DownloadStore.shared.backgroundCompletionHandler = completionHandler }
+    }
+
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
@@ -39,6 +50,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // while the phone is locked.
         options.suspendSessionsWhenBackgrounded = false
         GCKCastContext.setSharedInstanceWith(options)
+
+        // Start watching the network now, so the first track already knows
+        // whether it's on mobile data.
+        _ = NetworkMonitor.shared
+        // Reattach to downloads left running by the last launch.
+        Task { @MainActor in _ = DownloadStore.shared }
 
         return true
     }

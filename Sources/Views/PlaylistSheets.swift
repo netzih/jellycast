@@ -81,6 +81,21 @@ private struct TrackActionsModifier: ViewModifier {
             } label: {
                 Label("Add to playlist…", systemImage: "music.note.list")
             }
+            Divider()
+            if let item = source.item, item.type == "Audio",
+               DownloadStore.shared.state(for: item.id) == .downloaded {
+                Button(role: .destructive) {
+                    DownloadStore.shared.remove([item.id])
+                } label: {
+                    Label("Remove download", systemImage: "trash")
+                }
+            } else {
+                Button {
+                    withTracks { DownloadStore.shared.download($0) }
+                } label: {
+                    Label("Download", systemImage: "arrow.down.circle")
+                }
+            }
         }
     }
 

@@ -24,6 +24,17 @@ struct LibraryTab: View {
     @State private var newPlaylistName = ""
     @State private var pendingDelete: JFItem?
     @State private var actionError: String?
+    @State private var genres: [JFItem] = []
+
+    private var sortBinding: Binding<LibrarySort> {
+        kind == .artists ? $appState.artistSort : $appState.albumSort
+    }
+
+    /// Anything that changes what the list shows; a change reloads it.
+    private var loadKey: String {
+        [appState.selectedLibraryId ?? "all", sortBinding.wrappedValue.rawValue, appState.albumGenreId ?? "-"]
+            .joined(separator: "|")
+    }
 
     var body: some View {
         NavigationStack {
@@ -46,7 +57,7 @@ struct LibraryTab: View {
                     content
                 }
             }
-            .navigationTitle(kind.title)
+            .navigationTitle(navigationTitle)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if kind == .playlists {
@@ -64,6 +75,9 @@ struct LibraryTab: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) { CastButton().frame(width: 28, height: 28) }
+                if kind != .playlists {
+                    ToolbarItem(placement: .topBarTrailing) { sortMenu }
+                }
             }
             .refreshable { await load() }
             .addToPlaylistSheet($playlistTarget)
@@ -95,8 +109,60 @@ struct LibraryTab: View {
                 Text(actionError ?? "")
             }
         }
-        // Re-runs when the chosen library changes, so the list follows the picker.
-        .task(id: appState.selectedLibraryId) { await load() }
+        // Re-runs when the library, sort or genre changes, so the list follows them.
+        .task(id: loadKey) { await load() }
+        .task(id: appState.selectedLibraryId) {
+            guard kind == .albums, let client = appState.client else { return }
+            genres = (try? await client.genres()) ?? []
+        }
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            Picker("Sort by", selection: Binding(
+                get: { sortBinding.wrappedValue.field },
+                set: { field in
+                    // A new field starts in its natural direction (newest first for dates).
+                    sortBinding.wrappedValue = LibrarySort(field: field, ascending: field.defaultAscending)
+                }
+            )) {
+                ForEach(LibrarySort.Field.available(for: kind)) { Text($0.label).tag($0) }
+            }
+            if sortBinding.wrappedValue.field != .random {
+                Button {
+                    sortBinding.wrappedValue.ascending.toggle()
+                } label: {
+                    Label("Reverse order", systemImage: "arrow.up.arrow.down")
+                }
+            } else {
+                Button {
+                    Task { await load() }
+                } label: {
+                    Label("Shuffle again", systemImage: "shuffle")
+                }
+            }
+            // Only once the library actually has genres tagged.
+            if kind == .albums && !genres.isEmpty {
+                Divider()
+                Picker("Genre", selection: $appState.albumGenreId) {
+                    Text("All genres").tag(String?.none)
+                    ForEach(genres) { Text($0.name).tag(String?.some($0.id)) }
+                }
+                .pickerStyle(.menu)
+            }
+        } label: {
+            Image(systemName: appState.albumGenreId != nil && kind == .albums
+                  ? "line.3.horizontal.decrease.circle.fill" : "arrow.up.arrow.down.circle")
+        }
+        .accessibilityLabel("Sort")
+    }
+
+    private var navigationTitle: String {
+        if kind == .albums, let genreId = appState.albumGenreId,
+           let genre = genres.first(where: { $0.id == genreId }) {
+            return genre.name
+        }
+        return kind.title
     }
 
     @ViewBuilder
@@ -212,8 +278,8 @@ struct LibraryTab: View {
         loadError = nil
         do {
             switch kind {
-            case .albums: items = try await client.albums()
-            case .artists: items = try await client.artists()
+            case .albums: items = try await client.albums(sort: appState.albumSort, genreId: appState.albumGenreId)
+            case .artists: items = try await client.artists(sort: appState.artistSort)
             case .playlists: items = try await client.playlists()
             }
         } catch {
@@ -237,6 +303,8 @@ struct TrackListView: View {
     @State private var playlistTarget: PlaylistTarget?
     @State private var editMode: EditMode = .inactive
     @State private var actionError: String?
+    @State private var similar: [JFItem] = []
+    @ObservedObject private var downloads = DownloadStore.shared
 
     private var isPlaylist: Bool { container.type == "Playlist" }
 
@@ -258,6 +326,33 @@ struct TrackListView: View {
             } else {
                 Section { trackRows }
             }
+
+            if !similar.isEmpty {
+                Section {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(alignment: .top, spacing: 14) {
+                            ForEach(similar) { album in
+                                NavigationLink { TrackListView(container: album) } label: {
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        ArtworkView(url: appState.client?.artworkURL(for: album))
+                                            .frame(width: 120, height: 120)
+                                        Text(album.name).font(.footnote.weight(.medium)).lineLimit(1)
+                                        Text(album.displayArtist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                    }
+                                    .frame(width: 120)
+                                }
+                                .buttonStyle(.plain)
+                                .trackActions(.album(album), title: album.name, addingTo: $playlistTarget)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.hidden)
+                } header: {
+                    Text("More like this")
+                }
+            }
         }
         .listStyle(.plain)
         .environment(\.editMode, $editMode)
@@ -266,6 +361,9 @@ struct TrackListView: View {
         .toolbar {
             if isPlaylist && !tracks.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) { EditButton() }
+            }
+            if !tracks.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) { downloadButton }
             }
             ToolbarItem(placement: .topBarTrailing) { CastButton().frame(width: 28, height: 28) }
         }
@@ -282,6 +380,29 @@ struct TrackListView: View {
     }
 
     // MARK: - Pieces
+
+    @ViewBuilder
+    private var downloadButton: some View {
+        if downloads.allDownloaded(tracks) {
+            Menu {
+                Button(role: .destructive) {
+                    downloads.remove(tracks.map(\.id))
+                } label: {
+                    Label("Remove download", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "arrow.down.circle.fill")
+            }
+            .accessibilityLabel("Downloaded")
+        } else if tracks.contains(where: { downloads.active[$0.id] != nil }) {
+            ProgressView().controlSize(.small)
+        } else {
+            Button { downloads.download(tracks) } label: {
+                Image(systemName: "arrow.down.circle")
+            }
+            .accessibilityLabel("Download")
+        }
+    }
 
     private var header: some View {
         Section {
@@ -376,6 +497,7 @@ struct TrackListView: View {
 
                     Spacer(minLength: 8)
 
+                    DownloadBadge(itemId: track.id)
                     if appState.isFavorite(track) {
                         Image(systemName: "heart.fill")
                             .font(.caption2)
@@ -390,6 +512,7 @@ struct TrackListView: View {
             }
             .buttonStyle(.plain)
             .trackActions(.tracks([track]), title: track.name, addingTo: $playlistTarget)
+            .songSwipeActions(track, onRemove: isPlaylist ? { removeFromPlaylist(IndexSet(integer: offset)) } : nil)
         }
         .onDelete(perform: isPlaylist ? removeFromPlaylist : nil)
         .onMove(perform: isPlaylist ? moveWithinPlaylist : nil)
@@ -405,6 +528,9 @@ struct TrackListView: View {
             tracks = (try? await client.tracks(inParent: container.id)) ?? []
         }
         isLoading = false
+        if !isPlaylist {
+            similar = (try? await client.similar(to: container.id)) ?? []
+        }
     }
 
     /// Optimistic: the row disappears immediately and comes back if the server
@@ -450,6 +576,7 @@ struct ArtistDetailView: View {
     @EnvironmentObject var appState: AppState
 
     @State private var albums: [JFItem] = []
+    @State private var similarArtists: [JFItem] = []
     @State private var isLoading = true
     @State private var playlistTarget: PlaylistTarget?
 
@@ -480,11 +607,21 @@ struct ArtistDetailView: View {
                         } label: {
                             Label("Add to queue", systemImage: "text.append")
                         }
+                        Button {
+                            Task { await appState.player.playInstantMix(from: artist) }
+                        } label: {
+                            Label("Start Instant Mix", systemImage: "dot.radiowaves.left.and.right")
+                        }
                         Divider()
                         Button {
                             playlistTarget = PlaylistTarget(source: .artist(artist), title: artist.name)
                         } label: {
                             Label("Add to playlist…", systemImage: "music.note.list")
+                        }
+                        Button {
+                            withArtistTracks { DownloadStore.shared.download($0) }
+                        } label: {
+                            Label("Download everything", systemImage: "arrow.down.circle")
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -529,6 +666,33 @@ struct ArtistDetailView: View {
                     }
                     .padding(.horizontal, 16)
                 }
+
+                if !similarArtists.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Similar artists")
+                            .font(.title3.weight(.semibold))
+                            .padding(.horizontal, 16)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            LazyHStack(alignment: .top, spacing: 14) {
+                                ForEach(similarArtists) { other in
+                                    NavigationLink { ArtistDetailView(artist: other) } label: {
+                                        VStack(spacing: 5) {
+                                            ArtworkView(url: appState.client?.artworkURL(for: other), cornerRadius: 50)
+                                                .frame(width: 100, height: 100)
+                                            Text(other.name)
+                                                .font(.footnote.weight(.medium))
+                                                .lineLimit(1)
+                                        }
+                                        .frame(width: 100)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                        }
+                    }
+                    .padding(.top, 12)
+                }
             }
             .padding(.vertical, 12)
         }
@@ -539,6 +703,7 @@ struct ArtistDetailView: View {
             guard let client = appState.client else { return }
             albums = (try? await client.albums(forArtist: artist.id)) ?? []
             isLoading = false
+            similarArtists = (try? await client.similar(to: artist.id)) ?? []
         }
     }
 
@@ -644,6 +809,7 @@ struct SearchTab: View {
                     }
                     .buttonStyle(.plain)
                     .trackActions(.tracks([track]), title: track.name, addingTo: $playlistTarget)
+                    .songSwipeActions(track)
                 }
             }
         }

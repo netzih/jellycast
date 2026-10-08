@@ -267,6 +267,16 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             }
             quick.append(row)
         }
+        let downloads = DownloadStore.shared
+        if !downloads.downloaded.isEmpty {
+            let row = CPListItem(text: "Downloads", detailText: "\(downloads.downloaded.count) songs, no signal needed",
+                                 image: UIImage(systemName: "arrow.down.circle.fill"))
+            row.accessoryType = .disclosureIndicator
+            row.handler = { [weak self] _, completion in
+                Task { @MainActor in self?.showDownloads(); completion() }
+            }
+            quick.append(row)
+        }
         if libraryIsOnHome {
             let row = CPListItem(text: "Library", detailText: AppState.shared.selectedLibraryName ?? "All libraries",
                                  image: UIImage(systemName: "books.vertical"))
@@ -318,6 +328,33 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             sections.append(CPListSection(items: albumRows(justAdded), header: "Just added", sectionIndexTitle: nil))
         }
         return Array(sections.prefix(CPListTemplate.maximumSectionCount))
+    }
+
+    @MainActor
+    private func showDownloads() {
+        let albums = DownloadStore.shared.albums
+        let everything = albums.flatMap(\.tracks)
+
+        let shuffle = CPListItem(text: "Shuffle all downloads", detailText: nil, image: UIImage(systemName: "shuffle"))
+        shuffle.handler = { [weak self] _, completion in
+            Task { @MainActor in self?.start(everything, shuffle: true); completion() }
+        }
+        let albumRows = albums.prefix(CPListTemplate.maximumItemCount - 1).map { album -> CPListItem in
+            let row = CPListItem(text: album.title, detailText: album.artist)
+            if let art = album.tracks.first.flatMap({ DownloadStore.shared.localArtworkURL(for: $0.id) }),
+               let image = UIImage(contentsOfFile: art.path) {
+                row.setImage(image)
+            }
+            row.handler = { [weak self] _, completion in
+                Task { @MainActor in self?.start(album.tracks); completion() }
+            }
+            return row
+        }
+        let template = CPListTemplate(title: "Downloads", sections: [
+            CPListSection(items: [shuffle]),
+            CPListSection(items: Array(albumRows)),
+        ])
+        interfaceController?.pushTemplate(template, animated: true, completion: nil)
     }
 
     /// Small artwork, fetched after the row is already on screen.
@@ -418,8 +455,10 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             let items: [JFItem]
             do {
                 switch kind {
-                case .albums: items = try await client.albums(limit: 300)
-                case .artists: items = try await client.artists(limit: 300)
+                // Same order as the phone's lists. No genre filter: it isn't
+                // visible in the car, so it would only look like missing albums.
+                case .albums: items = try await client.albums(limit: 300, sort: AppState.shared.albumSort)
+                case .artists: items = try await client.artists(limit: 300, sort: AppState.shared.artistSort)
                 case .playlists: items = try await client.playlists()
                 }
             } catch {
