@@ -108,7 +108,8 @@ struct LoginView: View {
                             Spacer()
                         }
                     }
-                    .disabled(isWorking || server.isEmpty || username.isEmpty)
+                    .disabled(isWorking || server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                              || username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
 
                 Section {

@@ -161,8 +161,24 @@ final class JellyfinClient {
         return url
     }
 
+    /// The address the server actually answers on. `http://` often redirects to
+    /// `https://`, and iOS drops the Authorization header when it follows that
+    /// redirect, so Quick Connect gets a 400. Follow it once here and keep the
+    /// final address for everything after.
+    static func resolveServerURL(_ raw: String) async throws -> URL {
+        guard let baseURL = normalizeServerURL(raw) else { throw JellyfinError.badURL }
+        var request = URLRequest(url: baseURL.appendingPathComponent("System/Info/Public"))
+        request.timeoutInterval = 15
+        guard let finalURL = try? await URLSession.shared.data(for: request).1.url,
+              finalURL.path.hasSuffix("/System/Info/Public") else { return baseURL }
+        var components = URLComponents(url: finalURL, resolvingAgainstBaseURL: false)!
+        components.path = String(finalURL.path.dropLast("/System/Info/Public".count))
+        components.query = nil
+        return components.url ?? baseURL
+    }
+
     static func logIn(server: String, username: String, password: String) async throws -> JellyfinSession {
-        guard let baseURL = normalizeServerURL(server) else { throw JellyfinError.badURL }
+        let baseURL = try await resolveServerURL(server)
 
         var request = URLRequest(url: baseURL.appendingPathComponent("Users/AuthenticateByName"))
         request.httpMethod = "POST"
@@ -209,14 +225,14 @@ final class JellyfinClient {
     }
 
     static func quickConnectEnabled(server: String) async throws -> Bool {
-        guard let baseURL = normalizeServerURL(server) else { throw JellyfinError.badURL }
+        let baseURL = try await resolveServerURL(server)
         let data = try await anonymous("GET", baseURL, "QuickConnect/Enabled")
         return (try? JSONDecoder().decode(Bool.self, from: data)) ?? false
     }
 
     /// Starts a request; show `code` to the person, keep `secret` to poll with.
     static func initiateQuickConnect(server: String) async throws -> (baseURL: URL, code: String, secret: String) {
-        guard let baseURL = normalizeServerURL(server) else { throw JellyfinError.badURL }
+        let baseURL = try await resolveServerURL(server)
         let data: Data
         do {
             data = try await anonymous("POST", baseURL, "QuickConnect/Initiate")
