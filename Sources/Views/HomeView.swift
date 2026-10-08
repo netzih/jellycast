@@ -127,8 +127,8 @@ struct HomeTab: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Downloads").font(.headline)
                     Text(downloads.active.isEmpty
-                         ? "\(downloads.downloaded.count) songs on this iPhone"
-                         : "Downloading \(downloads.active.count) songs…")
+                         ? "\(countOf(downloads.downloaded.count, "song")) on this iPhone"
+                         : "Downloading \(countOf(downloads.active.count, "song"))…")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -152,7 +152,7 @@ struct HomeTab: View {
                     .foregroundStyle(.pink)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Favorite songs").font(.headline)
-                    Text("\(favoriteSongs.count) songs")
+                    Text(countOf(favoriteSongs.count, "song"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

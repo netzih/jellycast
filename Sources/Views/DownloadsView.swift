@@ -44,7 +44,7 @@ struct DownloadsView: View {
                     }
                     .listRowSeparator(.hidden)
                 } footer: {
-                    Text("\(downloads.downloaded.count) songs · \(ByteCountFormatter.string(fromByteCount: downloads.totalBytes, countStyle: .file))")
+                    Text("\(countOf(downloads.downloaded.count, "song")) · \(ByteCountFormatter.string(fromByteCount: downloads.totalBytes, countStyle: .file))")
                 }
 
                 ForEach(downloads.albums) { album in

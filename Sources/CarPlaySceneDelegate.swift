@@ -248,7 +248,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         // One-tap starts first: the whole point of Home behind the wheel.
         var quick: [CPListItem] = []
         if !favoriteSongs.isEmpty {
-            let row = CPListItem(text: "Shuffle favorite songs", detailText: "\(favoriteSongs.count) songs",
+            let row = CPListItem(text: "Shuffle favorite songs", detailText: countOf(favoriteSongs.count, "song"),
                                  image: UIImage(systemName: "heart.fill"))
             row.handler = { [weak self] _, completion in
                 Task { @MainActor in self?.start(favoriteSongs, shuffle: true); completion() }
@@ -269,7 +269,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         }
         let downloads = DownloadStore.shared
         if !downloads.downloaded.isEmpty {
-            let row = CPListItem(text: "Downloads", detailText: "\(downloads.downloaded.count) songs, no signal needed",
+            let row = CPListItem(text: "Downloads", detailText: "\(countOf(downloads.downloaded.count, "song")), no signal needed",
                                  image: UIImage(systemName: "arrow.down.circle.fill"))
             row.accessoryType = .disclosureIndicator
             row.handler = { [weak self] _, completion in

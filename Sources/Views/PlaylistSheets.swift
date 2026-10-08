@@ -177,7 +177,7 @@ struct AddToPlaylistSheet: View {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(playlist.name).lineLimit(1).foregroundStyle(.primary)
                                         if let count = playlist.childCount {
-                                            Text("\(count) tracks")
+                                            Text(countOf(count, "track"))
                                                 .font(.caption)
                                                 .foregroundStyle(.secondary)
                                         }

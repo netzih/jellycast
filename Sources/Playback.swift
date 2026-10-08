@@ -118,3 +118,8 @@ protocol PlaybackEngine: AnyObject {
     /// track at `index` is the one already playing, and it keeps playing.
     func reorder(_ queue: [PlaybackTrack], index: Int)
 }
+
+/// "1 song", "12 songs".
+func countOf(_ count: Int, _ noun: String) -> String {
+    "\(count) \(count == 1 ? noun : noun + "s")"
+}

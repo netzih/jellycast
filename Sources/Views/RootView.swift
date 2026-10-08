@@ -125,7 +125,7 @@ struct LoginView: View {
             }
             .navigationTitle("JellyCast")
             .sheet(isPresented: $showQuickConnect) {
-                QuickConnectSignInSheet(server: server).environmentObject(appState)
+                QuickConnectSignInSheet(server: server.trimmingCharacters(in: .whitespacesAndNewlines)).environmentObject(appState)
             }
         }
     }
@@ -134,7 +134,11 @@ struct LoginView: View {
         isWorking = true
         errorText = nil
         do {
-            try await appState.signIn(server: server, username: username, password: password)
+            // Keyboards add a space after a suggested word, and Jellyfin treats
+            // "demo " as a different user. Passwords stay as typed.
+            try await appState.signIn(server: server.trimmingCharacters(in: .whitespacesAndNewlines),
+                                      username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+                                      password: password)
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
@@ -246,6 +250,6 @@ struct SettingsTab: View {
 
     private var downloadSummary: String {
         guard !downloads.downloaded.isEmpty else { return "None" }
-        return "\(downloads.downloaded.count) songs · \(ByteCountFormatter.string(fromByteCount: downloads.totalBytes, countStyle: .file))"
+        return "\(countOf(downloads.downloaded.count, "song")) · \(ByteCountFormatter.string(fromByteCount: downloads.totalBytes, countStyle: .file))"
     }
 }
